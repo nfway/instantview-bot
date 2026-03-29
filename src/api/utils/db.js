@@ -1,176 +1,304 @@
-const schema = require('../models/schema');
+const fs = require('fs');
+const path = require('path');
 
-const {
-  MONGO_URI_OLD,
-  MONGO_URI_OLD_2,
-  MONGO_COLL_LINKS,
-  MONGO_COLL_I_LINKS,
-} = require('../../config/vars');
-const {createConnection} = require('../../config/mongoose');
-const {model} = require('mongoose');
 const {logger} = require('./logger');
-const {dbKeys} = require("../../config/consts");
-const schemaUpd = require("../models/schemaUpdatedAt");
+const {dbKeys} = require('../../config/consts');
 
-const LINKS_COLL = MONGO_COLL_LINKS || 'links';
-const I_LINKS_COLL = MONGO_COLL_I_LINKS || 'ilinks';
+const STATE_FILE = path.join(__dirname, '../../../.conf/state.json');
+const DEFAULT_STATE = {
+  version: 1,
+  links: {},
+  inline: {},
+  counters: [],
+};
 
-const links = model(LINKS_COLL, schema);
-const inlineLinks = model(I_LINKS_COLL, schema);
-const counter = model('counter', schemaUpd);
-const conn0 = createConnection(MONGO_URI_OLD);
-const conn1 = createConnection(MONGO_URI_OLD_2);
+let stateCache;
 
-const linksOld1 = conn0 && conn0.model(LINKS_COLL, schema);
-const inlineOld1 = conn0 && conn0.model(I_LINKS_COLL, schema);
+function readState() {
+  if (stateCache) {
+    return stateCache;
+  }
 
-const linksOld2 = conn1 && conn1.model(LINKS_COLL, schema);
-const inlineOld2 = conn1 && conn1.model(I_LINKS_COLL, schema);
+  try {
+    stateCache = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
+  } catch (error) {
+    stateCache = {...DEFAULT_STATE};
+    writeState();
+  }
 
-const stat = () => links.countDocuments();
+  stateCache.links = stateCache.links || {};
+  stateCache.inline = stateCache.inline || {};
+  stateCache.counters = Array.isArray(stateCache.counters) ? stateCache.counters : [];
 
-const clearFromCollection = async msg => {
+  return stateCache;
+}
+
+function writeState() {
+  fs.writeFileSync(STATE_FILE, JSON.stringify(stateCache, null, 2));
+}
+
+function isMoreThanADay(date) {
+  if (!date) {
+    return true;
+  }
+
+  const oneDay = 24 * 60 * 60 * 1000;
+  return Date.now() - new Date(date).getTime() > oneDay;
+}
+
+function normalizeCollection(collection) {
+  if (collection === dbKeys.counter) {
+    return 'counters';
+  }
+
+  return collection || 'links';
+}
+
+function toPlainObject(entry) {
+  if (!entry) {
+    return false;
+  }
+
+  return JSON.parse(JSON.stringify(entry));
+}
+
+function getCounterIndexes(filter = {}) {
+  const state = readState();
+
+  return state.counters
+    .map((item, index) => ({item, index}))
+    .filter(({item}) =>
+      Object.entries(filter).every(([key, value]) => item[key] === value),
+    )
+    .map(({index}) => index);
+}
+
+function getCounterIndex(filter = {}) {
+  const indexes = getCounterIndexes(filter);
+
+  if (!indexes.length) {
+    return -1;
+  }
+
+  return indexes[indexes.length - 1];
+}
+
+function stat() {
+  return Promise.resolve(
+    Object.values(readState().links).filter(item => item && item.iv).length,
+  );
+}
+
+async function clearFromCollection(msg) {
   const {text} = msg;
+  const state = readState();
 
   let search;
-  let mon = 1;
+  let months = 1;
 
   if (text.match(/^\/cleardb3_/)) {
-    const months = text.match('mon([0-9])');
-    if (months) {
-      mon = months[1];
+    const foundMonths = text.match(/mon([0-9]+)/);
+    if (foundMonths) {
+      months = +foundMonths[1];
     }
+
     search = text.replace('/cleardb3_', '');
     search = search.replace(/\s(.*?)$/, '');
     search = search.replace(/_/g, '.');
   } else {
-    search = text.replace('/cleardb', '');
-    search = search.trim();
+    search = text.replace('/cleardb', '').trim();
   }
+
   if (!search) {
-    return Promise.resolve('empty');
+    return 'empty';
   }
 
   const searchByDomain = new RegExp(`^https?://${search}`);
-
   const fromDate = new Date();
-  fromDate.setMonth(fromDate.getMonth() - mon);
+  fromDate.setMonth(fromDate.getMonth() - months);
 
-  const dMany = {
-    url: searchByDomain,
-    createdAt: {$lte: fromDate}
+  let removed = 0;
+  for (const [url, value] of Object.entries(state.links)) {
+    const createdAt = value.createdAt || value.updatedAt;
+    if (searchByDomain.test(url) && createdAt && new Date(createdAt) <= fromDate) {
+      delete state.links[url];
+      removed += 1;
+    }
+  }
+
+  writeState();
+
+  return `${JSON.stringify({deletedCount: removed})} - ${searchByDomain} - ${JSON.stringify(fromDate)}`;
+}
+
+function removeInline(url) {
+  const state = readState();
+  delete state.inline[url];
+  writeState();
+  return Promise.resolve();
+}
+
+function updateMapEntry(item, collection) {
+  const state = readState();
+  const now = new Date().toISOString();
+  const bucket = state[collection];
+  const current = bucket[item.url];
+
+  bucket[item.url] = {
+    ...(current || {createdAt: now}),
+    ...item,
+    updatedAt: now,
   };
-  let d;
-  d = await links.deleteMany(dMany);
 
-  return `${JSON.stringify(d)} - ${searchByDomain} - ${JSON.stringify(fromDate)}`;
-};
-
-const removeInline = url => inlineLinks.deleteMany({url});
-
-const updateOneLink = (item, collection = links) => {
-  const {url} = item;
-
-  if (item && item.iv) {
-    item.$inc = {af: 1};
+  if (!bucket[item.url].createdAt) {
+    bucket[item.url].createdAt = now;
   }
 
-  return collection.updateOne({url}, item, {upsert: true});
-};
+  writeState();
+  return Promise.resolve(toPlainObject(bucket[item.url]));
+}
 
-const getFromCollection = async (url, coll, insert = true) => {
-  const me = await coll.findOne({url});
-  if (insert || me) {
-    await updateOneLink({url}, coll);
+function updateCounterEntry(item) {
+  const state = readState();
+  const now = new Date().toISOString();
+  const {$inc, ...plainItem} = item;
+  const identity = {};
+
+  if (plainItem.url !== undefined) {
+    identity.url = plainItem.url;
+  }
+  if (plainItem.iv !== undefined) {
+    identity.iv = plainItem.iv;
+  }
+  if (plainItem.chanId !== undefined) {
+    identity.chanId = plainItem.chanId;
+  }
+  if (plainItem.userId !== undefined) {
+    identity.userId = plainItem.userId;
   }
 
-  return me;
-};
+  let index = getCounterIndex(identity);
+  let current = index >= 0 ? state.counters[index] : null;
 
-const getInline = async url => {
-  // check from old DB without insert
-  let me;
-  if (inlineOld1) {
-    me = await getFromCollection(url, inlineOld1, false);
-    if (me) {
-      logger('link from Old1 db')
+  if (current && isMoreThanADay(current.updatedAt)) {
+    current = null;
+  }
+
+  const next = {
+    ...(current || {createdAt: now}),
+    ...identity,
+    ...plainItem,
+    updatedAt: now,
+  };
+
+  if ($inc) {
+    for (const [key, value] of Object.entries($inc)) {
+      next[key] = (next[key] || 0) + value;
     }
   }
-  if (!me && inlineOld2) {
-    me = await getFromCollection(url, inlineOld2, false);
-    if (me) {
-      logger('link from Old2 db')
-    }
-  }
-  if (!me) {
-    me = await getFromCollection(url, inlineLinks);
-  }
-  return me;
-};
 
-const getIV = async url => {
-  // check from old DB without insert
-  let me;
-  if (linksOld1) {
-    me = await getFromCollection(url, linksOld1, false);
-    if (me) {
-      logger('link from Old1 db')
-    }
+  if (plainItem.iv && !$inc?.af) {
+    next.af = (current && current.af) || 0;
+    next.af += 1;
   }
-  if (!me && linksOld2) {
-    me = await getFromCollection(url, linksOld2, false);
-    if (me) {
-      logger('link from Old2 db')
-    }
-  }
-  if (!me) {
-    me = await getFromCollection(url, links);
-  }
-  if (me) {
-    return me.toObject();
-  }
-  return false;
-};
 
-const checkTimeFromLast = () => links.findOne({}, {}, {sort: {createdAt: -1}});
-const get = (params) => getCol(params.key).findOne(params.filter, params.project || {});
+  if (index >= 0) {
+    state.counters[index] = next;
+  } else {
+    state.counters.push(next);
+  }
 
-const getCleanData = async (txt) => {
+  writeState();
+  return Promise.resolve(toPlainObject(next));
+}
+
+function updateOneLink(item, collection = 'links') {
+  const normalizedCollection = normalizeCollection(collection);
+
+  if (normalizedCollection === 'counters') {
+    return updateCounterEntry(item);
+  }
+
+  if (!item || !item.url) {
+    logger(`skip empty update for ${normalizedCollection}`);
+    return Promise.resolve(false);
+  }
+
+  return updateMapEntry(item, normalizedCollection);
+}
+
+async function getFromCollection(url, collection, insert = true) {
+  const state = readState();
+  const bucket = state[collection];
+  const entry = bucket[url] || null;
+
+  if (insert) {
+    await updateOneLink({url}, collection);
+  }
+
+  return toPlainObject(entry);
+}
+
+async function getInline(url) {
+  return getFromCollection(url, 'inline');
+}
+
+async function getIV(url) {
+  return getFromCollection(url, 'links');
+}
+
+function checkTimeFromLast() {
+  const links = Object.values(readState().links);
+  const last = links.sort((a, b) => new Date(b.updatedAt || 0) - new Date(a.updatedAt || 0))[0];
+  return Promise.resolve(toPlainObject(last));
+}
+
+function get(params) {
+  if (params.key !== dbKeys.counter) {
+    return Promise.resolve(null);
+  }
+
+  const index = getCounterIndex(params.filter || {});
+  if (index < 0) {
+    return Promise.resolve(null);
+  }
+
+  const item = readState().counters[index];
+  if (isMoreThanADay(item.updatedAt)) {
+    return Promise.resolve(null);
+  }
+
+  return Promise.resolve(toPlainObject(item));
+}
+
+async function getCleanData(txt) {
   const nums = txt.match(/[0-9]+/);
-  let cnt = 4000;
-  if (nums) cnt = +nums[0];
+  let threshold = 4000;
 
-  const agg = [
-    {
-      $addFields: {
-        origin: {
-          $arrayElemAt: [{$split: ['$url', '/']}, 2],
-        },
-      },
-    },
-    {
-      $group: {
-        _id: '$origin',
-        cnt: {
-          $sum: 1,
-        },
-      },
-    },
-    {
-      $match: {
-        cnt: {
-          $gte: cnt,
-        },
-      },
-    },
-  ];
-  const result = await links.aggregate(agg);
+  if (nums) {
+    threshold = +nums[0];
+  }
 
-  return result.map(i => `${i._id.replace(/\./g, '_')} ${i.cnt}`);
-};
+  const counters = {};
+  for (const url of Object.keys(readState().links)) {
+    let hostname = '';
 
-const getCol = (key) => {
-  if (key === dbKeys.counter) return counter;
+    try {
+      hostname = new URL(url).hostname;
+    } catch (error) {
+      continue;
+    }
+
+    counters[hostname] = (counters[hostname] || 0) + 1;
+  }
+
+  return Object.entries(counters)
+    .filter(([, count]) => count >= threshold)
+    .map(([hostname, count]) => `${hostname.replace(/\./g, '_')} ${count}`);
+}
+
+function getCol(key) {
+  return key;
 }
 
 module.exports.stat = stat;

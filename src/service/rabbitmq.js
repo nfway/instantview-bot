@@ -1,228 +1,119 @@
-const amqp = require('amqplib');
 const {logger} = require('../api/utils/logger');
-const messages = require('../messages/format');
-
-const {
-  PUPPET_QUE,
-  RABBIT_MQ_QUE,
-  R_MQ_MAIN_CHANNEL,
-  R_MQ_SECOND_CHANNEL,
-  WORKER,
-} = require('../config/vars');
 const {parseEnvArray} = require('../api/utils');
 
-const TASKS_CHANNEL = R_MQ_MAIN_CHANNEL;
-
-let rChannel = null;
-
+const TASKS_CHANNEL = 'local';
 const starts = {
-  start: process.hrtime(),
-  start2: process.hrtime(),
-  start3: process.hrtime(),
+  [TASKS_CHANNEL]: process.hrtime(),
 };
+
+const queue = [];
+let consumer = null;
+let processing = false;
 let availableOne = true;
-
-const getStartName = q => {
-  let startName = 'start';
-  switch (q) {
-    case R_MQ_SECOND_CHANNEL:
-      startName = 'start2';
-      break;
-    case PUPPET_QUE:
-      startName = 'start3';
-      break;
-    default:
-      break;
-  }
-  return startName;
-};
-const elapsedSec = q => {
-  const startName = getStartName(q);
-  logger(startName);
-  return process.hrtime(starts[startName])[0];
-};
-
-const elapsedTime = (q = TASKS_CHANNEL) => {
-  const startName = getStartName(q);
-  let elapsed = process.hrtime(starts[startName])[1] / 1000000;
-  elapsed = `${process.hrtime(starts[startName])[0]}s, ${elapsed.toFixed(0)}`;
-  return `${elapsed}ms ${q}`;
-};
-
-const resetTime = (q = TASKS_CHANNEL) => {
-  const startName = getStartName(q);
-  logger(`reset ${startName}`);
-  starts[startName] = process.hrtime();
-};
-
-let connection = null;
-
-const startFirst = async () => {
-  if (!RABBIT_MQ_QUE) {
-    console.log(messages.warningMQ());
-    return;
-  }
-
-  try {
-    if (!connection) {
-      connection = await amqp.connect(RABBIT_MQ_QUE);
-    }
-    if (!rChannel) {
-      rChannel = await connection.createChannel();
-    }
-  } catch (e) {
-    console.log('err rabbit');
-    logger(e);
-  }
-};
-
-const createChan = async (queueName = TASKS_CHANNEL) => {
-  let channel;
-
-  if (!RABBIT_MQ_QUE) {
-    console.log(messages.warningMQ());
-    return undefined;
-  }
-  try {
-    if (!connection) {
-      connection = await amqp.connect(RABBIT_MQ_QUE);
-    }
-    channel = await connection.createChannel();
-    await channel.prefetch(1);
-    await channel.assertQueue(queueName, {durable: true});
-  } catch (e) {
-    console.log('err rabbit 1');
-    logger(e);
-  }
-
-  return channel;
-};
-
-const runMqChannel = async (job, qName) => {
-  try {
-    const queueName = qName;
-    if (!queueName) {
-      console.log('rabbit MQ channelName is not defined');
-      return;
-    }
-    const channel = await createChan(queueName);
-    if (!channel) return;
-    job.isClosed = false;
-    channel.consume(queueName, message => {
-      if (message) {
-        const {content} = message;
-        const task = JSON.parse(`${content}`);
-        if (queueName !== TASKS_CHANNEL) {
-          task.q = queueName;
-        }
-        job(task)
-          .then(() => {
-            channel.ack(message);
-          })
-          .catch(e => {
-            console.log('error job task');
-            console.log(e);
-            channel.ack(message);
-          });
-      }
-    });
-  } catch (e) {
-    console.log('err rabbit job');
-    logger(e);
-  }
-};
-
-const runMqChannels = job => {
-  if (!RABBIT_MQ_QUE) {
-    console.log(messages.warningMQ());
-    return;
-  }
-  setTimeout(() => {
-    runMqChannel(job, TASKS_CHANNEL);
-    if (R_MQ_SECOND_CHANNEL) {
-      runMqChannel(job, R_MQ_SECOND_CHANNEL);
-    }
-
-    if (PUPPET_QUE) {
-      runMqChannel(job, PUPPET_QUE);
-    }
-  }, 5000);
-};
 
 const keys = parseEnvArray('TGPHTOKEN');
 
-function shuffle(arr) {
-  let currentIndex = arr.length;
-  let temporaryValue;
-  let randomIndex;
+function elapsedMs(queueName = TASKS_CHANNEL) {
+  const start = starts[queueName] || process.hrtime();
+  const diff = process.hrtime(start);
+  return `${diff[0]}s, ${(diff[1] / 1000000).toFixed(0)}ms ${queueName}`;
+}
 
-  // While there remain elements to shuffle...
-  while (currentIndex !== 0) {
-    // Pick a remaining element...
-    randomIndex = Math.floor(Math.random() * currentIndex);
-    currentIndex -= 1;
+function resetTime(queueName = TASKS_CHANNEL) {
+  starts[queueName] = process.hrtime();
+}
 
-    // And swap it with the current element.
-    temporaryValue = arr[currentIndex];
-    arr[currentIndex] = arr[randomIndex];
-    arr[randomIndex] = temporaryValue;
+async function drain() {
+  if (!consumer || processing) {
+    return;
   }
 
-  return arr;
+  processing = true;
+
+  while (queue.length) {
+    const {task, queueName} = queue.shift();
+
+    try {
+      availableOne = false;
+      await consumer(queueName === TASKS_CHANNEL ? task : {...task, q: queueName});
+    } catch (error) {
+      logger('error local queue job');
+      logger(error);
+    } finally {
+      availableOne = true;
+    }
+  }
+
+  processing = false;
+}
+
+function startFirst() {
+  return Promise.resolve();
+}
+
+function runMqChannels(job) {
+  consumer = job;
+  void drain();
+}
+
+function addToChannel(task, queueName = TASKS_CHANNEL) {
+  queue.push({task, queueName});
+  void drain();
+}
+
+function shuffle(arr) {
+  const items = [...arr];
+
+  for (let i = items.length - 1; i > 0; i -= 1) {
+    const randomIndex = Math.floor(Math.random() * (i + 1));
+    const temp = items[i];
+    items[i] = items[randomIndex];
+    items[randomIndex] = temp;
+  }
+
+  return items;
 }
 
 function getKey() {
-  const hours = new Date().getHours();
-  const shuffleKeys = shuffle(keys);
+  if (!keys.length) {
+    return undefined;
+  }
 
-  return shuffleKeys.find((k, i) => hours <= (24 / keys.length) * (i + 1)) || keys[0];
+  const hours = new Date().getHours();
+  const shuffledKeys = shuffle(keys);
+
+  return shuffledKeys.find((key, index) => hours <= (24 / keys.length) * (index + 1)) || keys[0];
 }
 
-const getMqParams = (queueName = TASKS_CHANNEL) => {
-  const isPuppet = queueName === PUPPET_QUE;
-  const access_token = getKey();
-
+function getMqParams() {
   return {
-    isPuppet,
-    access_token,
+    isPuppet: false,
+    access_token: getKey(),
   };
-};
+}
 
-const addToChannel = (taskParams, qName = TASKS_CHANNEL) => {
-  if (rChannel) {
-    try {
-      let queueName = qName;
-      const el = elapsedTime(queueName);
-      const elTime = elapsedSec(queueName);
-      logger('');
-      logger(`availableOne ${availableOne}`);
-      if (queueName === TASKS_CHANNEL && !availableOne && elTime > 15) {
-        queueName = R_MQ_SECOND_CHANNEL;
-      }
-      logger(el);
-      const task = {...taskParams, ...(WORKER ? {w: 1} : {})};
+function time(queueName = TASKS_CHANNEL, start = false) {
+  const duration = elapsedMs(queueName);
 
-      rChannel.sendToQueue(queueName, Buffer.from(JSON.stringify(task)), {
-        contentType: 'application/json',
-        persistent: true,
-      });
-    } catch (e) {
-      console.log(e);
-    }
-  }
-};
-const time = (queueName = TASKS_CHANNEL, start = false) => {
-  if (queueName === TASKS_CHANNEL) {
-    availableOne = !start;
-  }
-  const time1 = elapsedTime(queueName);
   if (start) {
     resetTime(queueName);
   }
-  return time1;
-};
 
-const timeStart = q => time(q, true);
+  return duration;
+}
+
+function timeStart(queueName = TASKS_CHANNEL) {
+  availableOne = false;
+  return time(queueName, true);
+}
+
+function getQueueStats() {
+  return {
+    queued: queue.length,
+    processing,
+    availableOne,
+  };
+}
 
 module.exports.startFirst = startFirst;
 module.exports.addToChannel = addToChannel;
@@ -230,3 +121,4 @@ module.exports.getMqParams = getMqParams;
 module.exports.time = time;
 module.exports.runMqChannels = runMqChannels;
 module.exports.timeStart = timeStart;
+module.exports.getQueueStats = getQueueStats;

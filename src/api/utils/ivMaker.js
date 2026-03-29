@@ -68,11 +68,16 @@ const makeIvLink = async (urlParam, paramsObj) => {
 
   const {
     telegraphLink,
+    isLong,
     pages
   } = tgRes;
 
   if (!telegraphLink) {
-    throw new Error('empty ivlink');
+    const error = new Error(isLong ? 'content too large for Telegraph' : 'empty ivlink');
+    if (isLong) {
+      error.code = 'IV_TOO_BIG';
+    }
+    throw error;
   }
 
   const res = {

@@ -1,17 +1,10 @@
 const fs = require('fs');
 
-const {
-  BotHelper,
-  BANNED_ERROR
-} = require('../utils/bot');
+const {BotHelper, BANNED_ERROR} = require('../utils/bot');
 const format = require('./format');
 const db = require('../utils/db');
 const messages = require('../../messages/format');
-const {
-  WORKER,
-  NO_BOT,
-  IS_DEV
-} = require('../../config/vars');
+const {WORKER, NO_BOT, IS_DEV} = require('../../config/vars');
 const {logger} = require('../utils/logger');
 
 global.skipCount = 0;
@@ -23,7 +16,6 @@ if (!fs.existsSync(filepath)) {
 }
 
 const skipCountFile = '.test';
-
 let skipCount;
 
 if (fs.existsSync(skipCountFile)) {
@@ -31,32 +23,24 @@ if (fs.existsSync(skipCountFile)) {
 }
 
 let startCnt = parseInt(`${fs.readFileSync('count.txt')}`, 10);
-
 let limit90Sec = 0;
 
-const botRoute = (bot, conn) => {
+const botRoute = bot => {
   const botHelper = new BotHelper(bot.telegram, WORKER);
-  if (conn) {
-    conn.on('error', () => {
-      botHelper.disDb();
-    });
-    botHelper.setConn(conn);
-  } else {
-    botHelper.disDb();
-  }
 
-  bot.catch(e => {
+  bot.catch(error => {
     if (limit90Sec > 5) {
-      botHelper.sendError(`${e} Unhandled 90000 Restarted`);
+      botHelper.sendError(`${error} Unhandled 90000 Restarted`);
       setTimeout(() => {
         botHelper.restartApp();
       }, 4000);
       return;
     }
-    if (`${e}`.match('out after 90000 milliseconds')) {
+
+    if (`${error}`.match('out after 90000 milliseconds')) {
       limit90Sec += 1;
     } else {
-      botHelper.sendError(`${e} Unhandled x`);
+      botHelper.sendError(`${error} Unhandled x`);
     }
   });
 
@@ -74,15 +58,8 @@ const botRoute = (bot, conn) => {
 
   bot.command('stat', async ctx => {
     if (botHelper.isAdmin(ctx.message.chat.id)) {
-      if (!botHelper.conn) {
-        return ctx.reply('db off');
-      }
-      try {
-        const res = await db.stat();
-        return ctx.reply(res);
-      } catch (e) {
-        botHelper.sendError(e);
-      }
+      const res = await db.stat();
+      return ctx.reply(`cached links: ${res}`);
     }
   });
 
@@ -137,7 +114,6 @@ const botRoute = (bot, conn) => {
   bot.command('getClean', async ({message}) => {
     if (botHelper.isAdmin(message.from.id)) {
       const data = await db.getCleanData(message.text);
-
       return botHelper.sendAdmin(messages.cleanCommands(data));
     }
   });
@@ -145,7 +121,6 @@ const botRoute = (bot, conn) => {
   process.on('unhandledRejection', reason => {
     logger('unhandledRejection');
     if (`${reason}`.match('bot was blocked by the user')) {
-      // return;
       botHelper.sendAdmin(`unhandledRejection blocked ${reason}`);
     }
     if (`${reason}`.match(BANNED_ERROR)) {
@@ -167,11 +142,11 @@ const botRoute = (bot, conn) => {
   }
 
   startCnt += 1;
-
-  if (startCnt >= 500) startCnt = 0;
+  if (startCnt >= 500) {
+    startCnt = 0;
+  }
 
   fs.writeFileSync(filepath, `${startCnt}`);
-
   botHelper.setBlacklist();
 
   return botHelper;

@@ -1,418 +1,441 @@
-const broadcast = require('tgsend');
-// const broadcast = require('../../../../../git/tgsend');
 const fs = require('fs');
+const path = require('path');
+
 const {
-    TG_ADMIN_ID,
-    TG_BUGS_GROUP,
-    BLACK_LIST_FILE,
-    MONGO_URI_SECOND,
-    MONGO_URI_BROAD,
+  TG_ADMIN_ID,
+  TG_BUGS_GROUP,
+  BLACK_LIST_FILE,
+  ALLOWED_USER_IDS,
+  SINGLE_USER_ID,
 } = require('../../config/vars');
 const {logger} = require('./logger');
+const rabbitMq = require('../../service/rabbitmq');
 
-const {createConnection} = require("../../config/mongoose");
-const {Schema} = require("mongoose");
-const {get} = require("./db");
-const {dbKeys} = require("../../config/consts");
-
-const TG_ADMIN = parseInt(TG_ADMIN_ID, 10);
 const OFF = 'Off';
 const ON = 'On';
+const IS_CONTAINERIZED = ['1', 'true'].includes(
+  `${process.env.CONTAINERIZED || ''}`.toLowerCase(),
+);
 
 const PARSE_MODE_MARK = 'Markdown';
+const CONFIG_FILE = path.join(__dirname, '../../../.conf/config.json');
+const DEFAULT_CONFIG = {no_puppet: false};
 
 const INLINE_TITLE = 'InstantView created. Click me to send';
 const BANNED_ERROR = 'USER_BANNED_IN_CHANNEL';
 const RIGHTS_ERROR = 'need administrator rights in the channel chat';
 
 class BotHelper {
-    constructor(bot, worker) {
-        this.bot = bot;
-        this.config = {no_puppet: false};
-        try {
-            this.config = JSON.parse(`${fs.readFileSync('.conf/config.json')}`);
-        } catch (e) {
-            logger(e);
-        }
-        this.tgAdmin = TG_ADMIN;
-        this.waitSec = false;
-        this.worker = worker;
+  constructor(bot, worker) {
+    this.bot = bot;
+    this.config = {...DEFAULT_CONFIG};
+    this.db = true;
+
+    try {
+      if (!fs.existsSync(CONFIG_FILE)) {
+        fs.writeFileSync(CONFIG_FILE, JSON.stringify(DEFAULT_CONFIG, null, 2));
+      }
+      this.config = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8'));
+    } catch (error) {
+      logger(error);
     }
 
-    isAdmin(chatId) {
-        return chatId === this.tgAdmin;
+    this.tgAdmin = parseInt(TG_ADMIN_ID || SINGLE_USER_ID || '0', 10);
+    this.allowedUserIds = Array.isArray(ALLOWED_USER_IDS)
+      ? [...new Set(ALLOWED_USER_IDS)]
+      : [];
+    this.allowedUserId = parseInt(SINGLE_USER_ID || TG_ADMIN_ID || '0', 10);
+    this.waitSec = false;
+    this.worker = worker;
+  }
+
+  isAdmin(chatId) {
+    return !!this.tgAdmin && chatId === this.tgAdmin;
+  }
+
+  isAllowedUser(userId) {
+    if (this.allowedUserIds.length) {
+      return this.allowedUserIds.includes(userId);
     }
 
-    botMes(chatId, text, mark = true) {
-        if (this.worker) {
-            return Promise.resolve();
-        }
-        let opts = {};
-        if (mark) {
-            opts = {parse_mode: this.markdown()};
-        }
-        return this.bot
-            .sendMessage(chatId, text, opts)
-            .catch(e => this.sendError(e, `${chatId}${text}`));
+    if (!this.allowedUserId) {
+      return true;
     }
 
-    sendAdmin(textParam, chatIdParam = '', mark = false) {
-        if (this.worker) {
-            return Promise.resolve();
-        }
-        let chatId = chatIdParam;
-        let text = textParam;
-        let opts = {};
-        if (mark === true) {
-            opts = {
-                parse_mode: this.markdown(),
-                disable_web_page_preview: true,
-            };
-        }
-        if (!chatId) {
-            chatId = TG_ADMIN;
-        }
-        if (`${chatId}` === `${this.tgAdmin}`) {
-            text = `service: adm ${text}`;
+    return userId === this.allowedUserId;
+  }
 
-            if (text.match('Too Many')) {
-                const [sec] = text.match(/[0-9]+$/) || [];
-                if (sec) {
-                    this.waitSec = sec;
-                    clearTimeout(this.timer);
-                    this.timer = setTimeout(() => {
-                        this.waitSec = false;
-                    }, sec * 1000);
-                }
-            }
-        }
-
-        return this.bot.sendMessage(chatId, text, opts)
-            .catch(e => {
-                logger('Send admin');
-                logger(e);
-            });
+  botMes(chatId, text, mark = true) {
+    if (this.worker) {
+      return Promise.resolve();
     }
 
-    sendAdminOpts(text, opts) {
-        if (this.worker) {
-            return Promise.resolve();
-        }
-        const chatId = TG_BUGS_GROUP || TG_ADMIN;
-
-        return this.bot.sendMessage(chatId, text, opts)
-            .catch(e => {
-                logger('Send admin opts');
-                logger(e);
-            });
+    let opts = {};
+    if (mark) {
+      opts = {parse_mode: this.markdown()};
     }
 
-    sendInline({
-                   title,
-                   messageId,
-                   ivLink
-               }) {
-        if (this.worker) {
-            return Promise.resolve();
-        }
-        let inlineTitle = title;
-        if (!title) {
-            inlineTitle = INLINE_TITLE;
-        }
-        const queryResult = {
-            type: 'article',
-            id: messageId,
-            title: inlineTitle,
-            input_message_content: {message_text: ivLink},
-        };
+    return this.bot
+      .sendMessage(chatId, text, opts)
+      .catch(error => this.sendError(error, `${chatId}${text}`));
+  }
 
-        return this.bot.answerInlineQuery(messageId, [queryResult]);
+  sendAdmin(textParam, chatIdParam = '', mark = false) {
+    if (this.worker) {
+      return Promise.resolve();
     }
 
-    sendAdminMark(text, chatId) {
-        if (this.worker) {
-            return Promise.resolve();
-        }
-        return this.sendAdmin(text, chatId, true);
+    let chatId = chatIdParam || this.tgAdmin;
+    let text = textParam;
+    let opts = {};
+
+    if (!chatId) {
+      logger(text);
+      return Promise.resolve();
     }
 
-    getParams(hostname, chatId, force) {
-        const params = {};
-        const contentSelector =
-            force === 'content' || this.getConf(`${hostname}_content`);
-        if (contentSelector) {
-            params.content = contentSelector;
-        }
-        const puppetOnly = force === 'puppet' || this.getConf(`${hostname}_puppet`);
-        if (puppetOnly) {
-            params.isPuppet = true;
-        }
-        const customOnly = force === 'custom' || this.getConf(`${hostname}_custom`);
-        if (customOnly) {
-            params.isCustom = true;
-        }
-        const wget = force === 'wget' || this.getConf(`${hostname}_wget`);
-        if (wget) {
-            params.isWget = true;
-        }
-        const cached = force === 'cached' || this.getConf(`${hostname}_cached`);
-        if (cached) {
-            params.isCached = true;
-        }
-        const scroll = this.getConf(`${hostname}_scroll`);
-        if (scroll) {
-            params.scroll = scroll;
-        }
-        const noLinks =
-            force === 'no_links' || this.getConf(`${hostname}_no_links`);
-        if (noLinks) {
-            params.noLinks = true;
-        }
-        const pcache = force === 'p_cache';
-        if (pcache) {
-            params.isCached = true;
-            params.cachefile = 'puppet.html';
-            params.content = this.getConf('p_cache_content');
-        }
-        if (this.isAdmin(chatId)) {
-            if (this.getConf('test_puppet')) {
-                params.isPuppet = true;
-            }
-            if (this.getConf('test_custom')) {
-                params.isCustom = true;
-            }
-        }
-        const mozilla = this.getConf('mozilla');
-        if (mozilla) {
-            params.mozilla = true;
-        }
-        return params;
+    if (mark === true) {
+      opts = {
+        parse_mode: this.markdown(),
+        disable_web_page_preview: true,
+      };
     }
 
-    getConf(param) {
-        let configParam = this.config[param] || this.config[`_${param}`];
+    if (`${chatId}` === `${this.tgAdmin}`) {
+      text = `service: adm ${text}`;
 
-        return configParam === OFF ? '' : configParam;
-    }
-
-    parseConfig(params) {
-        let content;
-        if (params[0] === '_') {
-            // eslint-disable-next-line no-unused-vars
-            const [_, param, ...val] = params.split('_');
-            params = `${param} ${val.join('_')}`;
+      if (text.match('Too Many')) {
+        const [sec] = text.match(/[0-9]+$/) || [];
+        if (sec) {
+          this.waitSec = sec;
+          clearTimeout(this.timer);
+          this.timer = setTimeout(() => {
+            this.waitSec = false;
+          }, sec * 1000);
         }
-        let config = params.replace(' _content', '_content');
-        config = config.split(/\s/);
-        let [param] = config;
+      }
+    }
 
-        if (config.length === 2) {
-            content = config[1].replace(/~/g, ' ');
-            if (this.config[param] === content) content = OFF;
-        } else {
-            if (this.config[param] === ON || this.config[param]) {
-                content = OFF;
-            } else {
-                content = ON;
-            }
+    return this.bot.sendMessage(chatId, text, opts).catch(error => {
+      logger('Send admin');
+      logger(error);
+    });
+  }
+
+  sendAdminOpts(text, opts) {
+    if (this.worker) {
+      return Promise.resolve();
+    }
+
+    const chatId = TG_BUGS_GROUP || this.tgAdmin;
+    if (!chatId) {
+      logger(text);
+      return Promise.resolve();
+    }
+
+    return this.bot.sendMessage(chatId, text, opts).catch(error => {
+      logger('Send admin opts');
+      logger(error);
+    });
+  }
+
+  sendInline({title, messageId, ivLink}) {
+    if (this.worker) {
+      return Promise.resolve();
+    }
+
+    const queryResult = {
+      type: 'article',
+      id: messageId,
+      title: title || INLINE_TITLE,
+      input_message_content: {message_text: ivLink},
+    };
+
+    return this.bot.answerInlineQuery(messageId, [queryResult]);
+  }
+
+  sendAdminMark(text, chatId) {
+    if (this.worker) {
+      return Promise.resolve();
+    }
+
+    return this.sendAdmin(text, chatId, true);
+  }
+
+  getParams(hostname, chatId, force) {
+    const params = {};
+    const contentSelector =
+      force === 'content' || this.getConf(`${hostname}_content`);
+    if (contentSelector) {
+      params.content = contentSelector;
+    }
+
+    const puppetOnly = force === 'puppet' || this.getConf(`${hostname}_puppet`);
+    if (puppetOnly) {
+      params.isPuppet = true;
+    }
+
+    const customOnly = force === 'custom' || this.getConf(`${hostname}_custom`);
+    if (customOnly) {
+      params.isCustom = true;
+    }
+
+    const wget = force === 'wget' || this.getConf(`${hostname}_wget`);
+    if (wget) {
+      params.isWget = true;
+    }
+
+    const cached = force === 'cached' || this.getConf(`${hostname}_cached`);
+    if (cached) {
+      params.isCached = true;
+    }
+
+    const scroll = this.getConf(`${hostname}_scroll`);
+    if (scroll) {
+      params.scroll = scroll;
+    }
+
+    const noLinks =
+      force === 'no_links' || this.getConf(`${hostname}_no_links`);
+    if (noLinks) {
+      params.noLinks = true;
+    }
+
+    const pcache = force === 'p_cache';
+    if (pcache) {
+      params.isCached = true;
+      params.cachefile = 'puppet.html';
+      params.content = this.getConf('p_cache_content');
+    }
+
+    if (this.isAdmin(chatId)) {
+      if (this.getConf('test_puppet')) {
+        params.isPuppet = true;
+      }
+      if (this.getConf('test_custom')) {
+        params.isCustom = true;
+      }
+    }
+
+    if (this.getConf('mozilla')) {
+      params.mozilla = true;
+    }
+
+    return params;
+  }
+
+  getConf(param) {
+    const configParam = this.config[param] || this.config[`_${param}`];
+    return configParam === OFF ? '' : configParam;
+  }
+
+  parseConfig(params) {
+    let content;
+
+    if (params[0] === '_') {
+      const [_, param, ...val] = params.split('_');
+      params = `${param} ${val.join('_')}`;
+    }
+
+    let config = params.replace(' _content', '_content');
+    config = config.split(/\s/);
+    const [param] = config;
+
+    if (config.length === 2) {
+      content = config[1].replace(/~/g, ' ');
+      if (this.config[param] === content) {
+        content = OFF;
+      }
+    } else if (this.config[param] === ON || this.config[param]) {
+      content = OFF;
+    } else {
+      content = ON;
+    }
+
+    return {param, content};
+  }
+
+  toggleConfig(msg, send = true) {
+    if (typeof msg === 'string') {
+      msg = {text: msg};
+    }
+
+    let params = msg.text.replace('/config', '').trim();
+
+    if (!params || !this.isAdmin(msg.chat.id)) {
+      return Promise.resolve('no param or forbidden');
+    }
+
+    const {param, content} = this.parseConfig(params);
+    this.config[param] = content;
+    fs.writeFileSync(CONFIG_FILE, JSON.stringify(this.config, null, 2));
+
+    return send && this.botMes(this.tgAdmin, content, false);
+  }
+
+  showConfig() {
+    const allowedUsers = this.allowedUserIds.length
+      ? this.allowedUserIds.join(',')
+      : this.allowedUserId || 'all';
+    return `${JSON.stringify(this.config)} allowedUser=${allowedUsers}`;
+  }
+
+  sendError(error, text = '') {
+    let errorResult = error;
+
+    if (typeof errorResult === 'object' && !global.isDevEnabled) {
+      if (errorResult.response && typeof errorResult.response === 'object') {
+        errorResult = errorResult.response.description || 'unknown error';
+        if (errorResult.match(BANNED_ERROR) || errorResult.match(RIGHTS_ERROR)) {
+          return;
         }
-
-        return {
-            param,
-            content
-        };
+      }
+    } else {
+      errorResult = `has error: ${JSON.stringify(errorResult)} ${errorResult.toString()} ${text}`;
     }
 
-    toggleConfig(msg, send = true) {
-        if (typeof msg === 'string') {
-            msg = {text: msg};
-        }
-        let params = msg.text.replace('/config', '');
-        params = params.trim();
+    this.sendAdmin(errorResult);
+  }
 
-        if (!params || !this.isAdmin(msg.chat.id)) {
-            return Promise.resolve('no param or forbidden');
-        }
+  disDb() {
+    this.db = false;
+  }
 
-        const {
-            param,
-            content
-        } = this.parseConfig(params);
-        this.config[param] = content;
-        fs.writeFileSync('.conf/config.json', JSON.stringify(this.config));
+  setBlacklist() {
+    const blf = fs.readFileSync(BLACK_LIST_FILE);
+    this.bllist = `${blf ? `${blf}` : ''}`;
+  }
 
-        return send && this.botMes(TG_ADMIN, content, false);
+  isBlackListed(hostname) {
+    return this.bllist && this.bllist.match(hostname);
+  }
+
+  forwardMes(mid, from, to) {
+    if (this.worker) {
+      return Promise.resolve();
     }
 
-    showConfig() {
-        return `${JSON.stringify(this.config)} db is ${this.db}`;
+    return this.bot.forwardMessage(to, from, mid);
+  }
+
+  sendIV(chatId, messageId, inlineMessageId, messageText, extra) {
+    if (this.worker) {
+      return Promise.resolve();
     }
 
-    sendError(error, text = '') {
-        let errorResult = error;
-        if (typeof errorResult === 'object' && !global.isDevEnabled) {
-            if (errorResult.response && typeof errorResult.response === 'object') {
-                errorResult = errorResult.response.description || 'unknown error';
-                if (errorResult.match(BANNED_ERROR) || errorResult.match(RIGHTS_ERROR)) {
-                    return;
-                }
-            }
-        } else {
-            errorResult = `has error: ${JSON.stringify(errorResult)} ${errorResult.toString()} ${text}`;
-        }
-
-        this.sendAdmin(errorResult);
+    let text = messageText;
+    if (extra && extra.parse_mode === this.markdown()) {
+      text = text.replace(/[*`]/gi, '');
     }
 
-    disDb() {
-        console.log('db disabled');
-        this.db = false;
+    return this.bot
+      .editMessageText(chatId, messageId, inlineMessageId, text, extra)
+      .catch(error => {
+        logger('send iv error');
+        logger(error);
+      });
+  }
+
+  sendIVNew(chatId, messageText, extra) {
+    if (this.worker) {
+      return Promise.resolve();
     }
 
-    setBlacklist() {
-        const blf = fs.readFileSync(BLACK_LIST_FILE);
-        this.bllist = `${blf ? `${blf}` : ''}`;
+    let text = messageText;
+    if (extra && extra.parse_mode === this.markdown()) {
+      text = text.replace(/[*`]/gi, '');
     }
 
-    isBlackListed(h) {
-        return this.bllist && this.bllist.match(h);
+    return this.bot.sendMessage(chatId, text, extra).catch(error => {
+      logger('send iv new error');
+      logger(error);
+    });
+  }
+
+  delMessage(chatId, messageId) {
+    if (this.worker) {
+      return Promise.resolve();
     }
 
-    forwardMes(mid, from, to) {
-        if (this.worker) {
-            return Promise.resolve();
-        }
-        return this.bot.forwardMessage(to, from, mid);
-    }
+    return this.bot.deleteMessage(chatId, messageId).catch(error => {
+      logger('del mess error');
+      logger(error);
+    });
+  }
 
-    sendIV(chatId, messageId, inlineMessageId, messageText, extra) {
-        if (this.worker) {
-            return Promise.resolve();
-        }
+  markdown() {
+    return PARSE_MODE_MARK;
+  }
 
-        let text = messageText;
-        if (extra && extra.parse_mode === this.markdown()) {
-            text = text.replace(/[*`]/gi, '');
-        }
-
-        return this.bot
-            .editMessageText(chatId, messageId, inlineMessageId, text, extra)
-            .catch(e => {
-                logger('send iv error');
-                logger(e);
-            });
-    }
-
-    sendIVNew(chatId, messageText, extra) {
-        if (this.worker) {
-            return Promise.resolve();
-        }
-        let text = messageText;
-        if (extra && extra.parse_mode === this.markdown()) {
-            text = text.replace(/[*`]/gi, '');
-        }
-        return this.bot.sendMessage(chatId, text, extra)
-            .catch(e => {
-                logger('send iv new error');
-                logger(e);
-            });
-    }
-
-    delMessage(chatId, messageId) {
-        if (this.worker) {
-            return Promise.resolve();
-        }
-        return this.bot.deleteMessage(chatId, messageId)
-            .catch((e) => {
-                logger('del mess error');
-                logger(e);
-            });
-    }
-
-    markdown() {
-        return PARSE_MODE_MARK;
-    }
-
-    restartApp() {
-        const {spawn} = require('child_process');
-        spawn('pm2', ['restart', 'Format'], {
-            stdio: 'ignore',
-            detached: true,
-        })
-            .unref();
-        this.sendAdmin('restarted');
-    }
-
-    gitPull() {
-        const {spawn} = require('child_process');
-        const gPull = spawn('git pull && pm2 restart Format --time', {shell: true});
-        let log = 'Res: ';
-        gPull.stdout.on('data', data => {
-            log += `${data}`;
+  restartApp() {
+    if (IS_CONTAINERIZED) {
+      this.sendAdmin('restart requested, exiting for docker compose restart')
+        .finally(() => {
+          setTimeout(() => {
+            process.exit(1);
+          }, 1000);
         });
-        gPull.stdout.on('end', () => {
-            logger(log);
-            this.sendAdmin(log);
-        });
+      return;
     }
 
-    setConn(c) {
-        this.conn = c;
+    const {spawn} = require('child_process');
+    spawn('pm2', ['restart', 'Format'], {
+      stdio: 'ignore',
+      detached: true,
+    }).unref();
+    this.sendAdmin('restarted');
+  }
+
+  gitPull() {
+    if (IS_CONTAINERIZED) {
+      this.sendAdmin(
+        'gitPull is disabled in docker compose; redeploy on the host with docker compose up -d --build',
+      );
+      return;
     }
 
-    getInfo() {
-        if (this.conn) {
-            return this.conn.db.command({atlasSize: 1});
-        }
-        return Promise.resolve({});
-    }
+    const {spawn} = require('child_process');
+    const gPull = spawn('git pull && pm2 restart Format --time', {shell: true});
+    let log = 'Res: ';
 
-    getMidMessage(mId) {
-        let mMessage = process.env[`MID_MESSAGE${mId}`] || '';
-        mMessage = mMessage.replace('*', '\n');
-        return mMessage;
-    }
+    gPull.stdout.on('data', data => {
+      log += `${data}`;
+    });
 
-    startBroad(ctx) {
-        if (!this.isAdmin(ctx.message.chat.id)) {
-            console.log('is not adm')
-            return 'is not admin';
-        }
-        // console.log('is adm')
-        // return 'is admin';
+    gPull.stdout.on('end', () => {
+      logger(log);
+      this.sendAdmin(log);
+    });
+  }
 
-        if (ctx.message.text.match('createBroadcast')) {
-            this.conn = createConnection(MONGO_URI_SECOND);
-        }
-        this.connSend = createConnection(MONGO_URI_BROAD);
-        this.schema = new Schema({}, {
-            strict: false,
-            versionKey: false
-        });
-        broadcast(ctx, this);
-    }
+  setConn(conn) {
+    this.conn = conn;
+  }
 
-    async checkAccess(chatId, userId) {
-        if (userId < 0) {
-            if (this.config['accessChan' + userId]) return true;
+  getInfo() {
+    return Promise.resolve({
+      allowedUserIds: this.allowedUserIds.length
+        ? this.allowedUserIds
+        : this.allowedUserId
+          ? [this.allowedUserId]
+          : null,
+      queue: rabbitMq.getQueueStats(),
+    });
+  }
 
-            const uId = await get({
-                key: dbKeys.counter,
-                filter: {
-                    chanId: userId,
-                },
-                project: 'userId',
-            });
+  getMidMessage(mId) {
+    let mMessage = process.env[`MID_MESSAGE${mId}`] || '';
+    mMessage = mMessage.replace('*', '\n');
+    return mMessage;
+  }
 
-            if (!uId) return false;
-            this.config['accessChan' + userId] = 1;
-        }
+  startBroad() {
+    return 'broadcast is disabled in single-user mode';
+  }
 
-        const hasAccess = await this.bot.getChatMember(chatId, userId);
-        // console.log('hasAccess');
-        // console.log(hasAccess);
-        return hasAccess && hasAccess.status !== 'left';
-    }
+  checkAccess(chatId, userId) {
+    return Promise.resolve(this.isAllowedUser(userId));
+  }
 }
 
 exports.BotHelper = BotHelper;

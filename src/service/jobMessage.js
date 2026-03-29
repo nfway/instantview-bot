@@ -13,7 +13,7 @@ const {
   HELP_MESSAGE,
   TG_GROUP,
   TG_BUGS_GROUP,
-  IV_MAKING_TIMEOUT
+  IV_MAKING_TIMEOUT,
 } = require('../config/vars');
 
 const messages = require('../messages/format');
@@ -42,7 +42,6 @@ const jobMessage = (botHelper, browserWs, skip) => async task => {
     w: isWorker,
     fromId,
     pdf,
-    pdfReset,
     pdfTitle,
   } = task;
 
@@ -186,12 +185,7 @@ const jobMessage = (botHelper, browserWs, skip) => async task => {
         const longStr = isLong ? `Long${pages ? ` ${pages}` : ''}` : '';
         IV_TITLE = `${title}\n`;
         if (pdf) {
-          let pdfUpd = {url: chatId}
-          if (pdfReset) {
-            pdfUpd.$inc = {count: 1};
-            pdfUpd.af = 1;
-          } else pdfUpd.iv = 'pdf';
-          await db.updateOneLink(pdfUpd, db.getCol(dbKeys.counter));
+          await db.updateOneLink({url: chatId, iv: 'pdf'}, db.getCol(dbKeys.counter));
         }
         RESULT = messages.showIvMessage(longStr, iv, `${link}`, host);
         successIv = true;
@@ -203,6 +197,8 @@ const jobMessage = (botHelper, browserWs, skip) => async task => {
       if (timeOutLink) {
         IV_TITLE = '';
         RESULT = messages.timeOut();
+      } else if (e && e.code === 'IV_TOO_BIG') {
+        RESULT = messages.tooBig(link, HELP_MESSAGE || '');
       } else {
         RESULT = messages.broken(link, HELP_MESSAGE || '');
       }

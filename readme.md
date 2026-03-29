@@ -1,29 +1,90 @@
-This bot makes instant view from channel post that have not IV
+# InstantView Bot
 
-You can find this bot by keywords such as “InstantViewBot”
+[中文](README.zh-CN.md)
+
+This bot generates Instant View links in Telegram.
+
+This version is designed for `one or more users`:
+
+- No MongoDB required
+- No RabbitMQ required
+- Local JSON cache and state are stored in `.conf/state.json`
+- Uses a single-process serial queue
+- Supports single-user or multi-user access control
 
 ## Features
 
-- [x] Extract link from amp,clck,bit.ly
-- [x] Create IW from any full link
-- [x] Compress Content
-- [x] Partially support too long content
-- [x] Second "process queue"
-- [x] Text/Html/MD Document from storage
-- [ ] Better parse images
-- [ ] Multi links
+- [x] Extract redirected links such as amp, clck, and bit.ly
+- [x] Create IV from a full article link
+- [x] Compress article content
+- [x] Split long content into multiple Telegraph pages
+- [x] Queue tasks in a single process
+- [x] Cache IV results locally
+- [ ] Better image parsing
+- [ ] Better multi-link handling
 
-## 🔨 Installation
+## Environment Variables
 
-**Required env:**
-- DEV           = 1 show logging
-- TBTKN         = bot token
-- TGGROUP       = group for logs
-- TGADMIN       = admin telegram id
-- TGPHTOKEN     = Telegra.ph token
-- MESSAGE_QUEUE = rabbitmq message queue connection, thanks [cloudamqp.com](https://cloudamqp.com)
-- MONGO_URI = mongodb connection uri, thanks [cloud.mongodb.com](https://cloud.mongodb.com)
+Required:
 
-### Wiki [Instruction to run](https://github.com/albertincx/formatbot1/wiki/How-to-RUN)
+- `TBTKN`: Telegram Bot Token
+- `TGADMIN`: Telegram admin user ID
+- `TGPHTOKEN_0`: Telegraph access token
 
-### The story of the Bot https://safiullin.dev/2024/03/31/ru/kak-ya-sozdaval-bota-dlya-telegram-InstantViewBot/
+Access control:
+
+- `ALLOWED_USER_IDS`: Comma-separated Telegram user IDs allowed to use the bot
+- `SINGLE_USER_ID`: Legacy single-user fallback, used only when `ALLOWED_USER_IDS` is empty
+
+Priority:
+
+- `ALLOWED_USER_IDS` > `SINGLE_USER_ID` > `TGADMIN`
+
+Optional:
+
+- `DEV=1`: Enable debug logs
+- `BOT_USERNAME`: Bot username without `@`
+- `HELP_MESSAGE`: Extra message when parsing fails
+- `NO_PUPPET=1`: Disable Puppeteer fallback
+- `NO_PARSE=1`: Disable parsing flow
+- `IV_MAKING_TIMEOUT=60`: IV creation timeout in seconds
+- `TGGROUP`: Log group ID
+- `TGGROUPBUGS`: Error log group ID
+
+See the full example:
+
+- [.env.sample](.env.sample)
+
+## Local Run
+
+```bash
+cp .env.sample .env
+npm install
+npm start
+```
+
+## Docker Compose
+
+```bash
+cp .env.sample .env
+docker compose up -d --build
+```
+
+View logs:
+
+```bash
+docker compose logs -f
+```
+
+Restart or redeploy:
+
+```bash
+docker compose restart
+docker compose up -d --build
+```
+
+Notes:
+
+- `.conf` persists bot config, blacklist, and cached state
+- `.docs` persists temporary runtime documents
+- The container no longer runs `pm2 restart` or `git pull`; redeploy from the host with Docker Compose instead

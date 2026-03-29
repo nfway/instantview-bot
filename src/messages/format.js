@@ -9,6 +9,10 @@ module.exports = {
     `Sorry, but your [link](${link}) is broken, restricted, or content is empty${
       helpMessage ? `\n${helpMessage}` : ''
     }`,
+  tooBig: (link, helpMessage) =>
+    `Sorry, but your [link](${link}) is too large to convert into Instant View${
+      helpMessage ? `\n${helpMessage}` : ''
+    }`,
   brokenFile: reason => `Sorry, but your file invalid, reason: ${reason}`,
   timeOut: () =>
     'Work has been reset/server is not responding, please try again later',
@@ -20,7 +24,7 @@ module.exports = {
   cleanCommands: links =>
     `${links.length ? `\n/cleardb3_${links.join('\n/cleardb3_')}` : ''}`,
   errorEnv: () =>
-    'PLEASE CREATE .env file with params, for more info see .env.example',
+    'PLEASE PROVIDE REQUIRED ENV VARS OR .env FILE, for more info see .env.sample',
   warningMQ: () => 'warn: env MESSAGE_QUEUE is NOT set',
   errorTasks: () => 'PLEASE ADD TASKS_DEV, TASKS2_DEV params in .env file',
 };

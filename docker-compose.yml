@@ -1,0 +1,18 @@
+services:
+  bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: instantviewbot
+    restart: unless-stopped
+    init: true
+    env_file:
+      - .env
+    environment:
+      CONTAINERIZED: "1"
+      NODE_ENV: production
+      TZ: Asia/Shanghai
+    volumes:
+      - ./.conf:/app/.conf
+      - ./.docs:/app/.docs
+    command: npm start
