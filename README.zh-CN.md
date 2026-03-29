@@ -29,7 +29,7 @@
 
 - `TBTKN`：Telegram Bot Token
 - `TGADMIN`：Telegram 管理员用户 ID
-- `TGPHTOKEN_0`：Telegraph access token
+- `TGPHTOKEN_0`：Telegraph access token（粘贴以下链接到浏览器获得你的 token: `https://api.telegra.ph/createAccount?short_name=你的Bot名称&author_name=你的Bot作者名`）
 
 访问控制：
 

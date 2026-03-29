@@ -29,7 +29,7 @@ Required:
 
 - `TBTKN`: Telegram Bot Token
 - `TGADMIN`: Telegram admin user ID
-- `TGPHTOKEN_0`: Telegraph access token
+- `TGPHTOKEN_0`: Telegraph access token (get your token via: `https://api.telegra.ph/createAccount?short_name=yourBot&author_name=TempMailBot`)
 
 Access control:
 
