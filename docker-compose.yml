@@ -1,8 +1,6 @@
 services:
   bot:
-    build:
-      context: .
-      dockerfile: Dockerfile
+    image: ghcr.io/nfway/instantview-bot:latest
     container_name: instantviewbot
     restart: unless-stopped
     init: true
