@@ -1,5 +1,6 @@
 const {get} = require("node:https");
 const {createWriteStream} = require("node:fs");
+const {randomUUID} = require('node:crypto');
 const {
     docsDir,
 } = require('../../config/vars');
@@ -81,18 +82,18 @@ const pdfExport = async (path) => {
 
 const getTextFromPDF = (link) => {
     return new Promise((resolve, reject) => {
-        get(link, (r) => {
-            r.pipe(createWriteStream(`${docsDir}/tmp.pdf`));
+        const pdfPath = path.join(docsDir, `${randomUUID()}.pdf`);
+        const request = get(link, (r) => {
+            const file = createWriteStream(pdfPath);
+
             r.on('error', reject);
-            r.on('end', () => {
-                // return `${docsDir}/tmp.pdf`;
-                resolve(`${docsDir}/tmp.pdf`);
-                // pdfExport(`${docsDir}/tmp.pdf`).then(data => {
-                //     console.log('data');
-                //     console.log(data);
-                // });
-            });
-        })
+            file.on('error', reject);
+            file.on('finish', () => resolve(pdfPath));
+
+            r.pipe(file);
+        });
+
+        request.on('error', reject);
     })
 }
 

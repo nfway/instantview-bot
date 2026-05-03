@@ -307,7 +307,7 @@ class BotHelper {
   }
 
   isBlackListed(hostname) {
-    return this.bllist && this.bllist.match(hostname);
+    return !!(this.bllist && hostname && this.bllist.includes(hostname));
   }
 
   forwardMes(mid, from, to) {
@@ -395,16 +395,37 @@ class BotHelper {
     }
 
     const {spawn} = require('child_process');
-    const gPull = spawn('git pull && pm2 restart Format --time', {shell: true});
+    const gitPull = spawn('git', ['pull'], {shell: false});
     let log = 'Res: ';
 
-    gPull.stdout.on('data', data => {
+    gitPull.stdout.on('data', data => {
       log += `${data}`;
     });
 
-    gPull.stdout.on('end', () => {
-      logger(log);
-      this.sendAdmin(log);
+    gitPull.stderr.on('data', data => {
+      log += `${data}`;
+    });
+
+    gitPull.on('close', code => {
+      if (code !== 0) {
+        logger(log);
+        this.sendAdmin(`git pull failed (${code}): ${log}`);
+        return;
+      }
+
+      const pm2Restart = spawn('pm2', ['restart', 'Format', '--time'], {
+        shell: false,
+      });
+      pm2Restart.stdout.on('data', data => {
+        log += `${data}`;
+      });
+      pm2Restart.stderr.on('data', data => {
+        log += `${data}`;
+      });
+      pm2Restart.on('close', restartCode => {
+        logger(log);
+        this.sendAdmin(`git pull completed, pm2 restart exited ${restartCode}: ${log}`);
+      });
     });
   }
 

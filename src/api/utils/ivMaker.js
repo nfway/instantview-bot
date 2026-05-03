@@ -14,6 +14,34 @@ function from64(v) {
 
 const GOOGLE_DOMAIN = from64('bmV3cy5nb29nbGUuY29t');
 
+// Wordpress sites often return application/octet-stream or other non-text MIME
+// types, which would incorrectly trigger the "it looks like a file" path.
+// Detect Wordpress by known URL patterns.
+function isLikelyWordPressUrl(value) {
+  try {
+    const parsed = new URL(value);
+    return (
+      parsed.hostname.endsWith('wordpress.com') ||
+      /\/wp-(content|includes|admin|json)\b/i.test(parsed.pathname) ||
+      /[?&]rest_route=/i.test(parsed.search)
+    );
+  } catch (error) {
+    return /\/wp-(content|includes|admin|json)\b|[?&]rest_route=/i.test(`${value}`);
+  }
+}
+
+// Detect Wordpress by response headers such as Link (REST API) or X-Pingback.
+function isLikelyWordPressHeaders(headers) {
+  const linkHeader = `${headers.get('link') || ''}`.toLowerCase();
+  const pingbackHeader = `${headers.get('x-pingback') || ''}`.toLowerCase();
+
+  return (
+    linkHeader.includes('wp-json') ||
+    linkHeader.includes('api.w.org') ||
+    pingbackHeader.includes('xmlrpc.php')
+  );
+}
+
 const pdfToHtml = async (link) => {
   try {
     const pdfPath = await getTextFromPDF(link);
@@ -134,10 +162,15 @@ const isText = async (urlParam, q) => {
     } = response;
 
     url = newUrl;
-    const contentType = headers.get('content-type') || '';
-    startsText = contentType.startsWith('text/');
+    const contentType = `${headers.get('content-type') || ''}`.toLowerCase();
+    startsText =
+      contentType.startsWith('text/') ||
+      contentType.includes('html') ||
+      isLikelyWordPressUrl(url) ||
+      isLikelyWordPressHeaders(headers);
   } catch (e) {
     logger(e);
+    startsText = true;
   }
 
   return {

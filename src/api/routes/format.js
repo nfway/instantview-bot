@@ -24,10 +24,12 @@ const {jobMessage} = require('../../service/jobMessage');
 const {dbKeys} = require('../../config/consts');
 
 global.lastIvTime = +new Date();
+global.lastUnauthorizedAlertTime = 0;
 global.emptyTextCount = 0;
 
-const validRegex = '^(https?:\\/\\/)?(www.)?(graph.org|telegra.ph|www.youtube.com\\/watch)';
+const validRegex = '^(https?:\\/\\/)?(www\\.)?(graph\\.org|telegra\\.ph|www\\.youtube\\.com\\/watch)';
 const PDF_LINK = 'https://pdf.pdf/pdf';
+const UNAUTHORIZED_ALERT_INTERVAL = 3600 * 1000;
 
 rabbitMq.startFirst();
 
@@ -117,6 +119,23 @@ async function queueInlineQuery(msg, botHelper) {
   }).catch(() => {});
 }
 
+// Notify admin when a non-authorized, non-admin user sends a message.
+// Rate-limited: at most one alert per UNAUTHORIZED_ALERT_INTERVAL.
+function notifyUnauthorizedUser(message, botHelper) {
+  const now = Date.now();
+  if (now - (global.lastUnauthorizedAlertTime || 0) < UNAUTHORIZED_ALERT_INTERVAL) {
+    return;
+  }
+
+  global.lastUnauthorizedAlertTime = now;
+  const from = message.from || {};
+  const chat = message.chat || {};
+  const text = `${message.text || message.caption || ''}`.slice(0, 200);
+  botHelper.sendAdmin(
+    `unauthorized user input from=${from.id || 'unknown'} chat=${chat.id || 'unknown'} username=${from.username || ''} text=${text}`,
+  );
+}
+
 async function addToQueue(ctx, botHelper) {
   const isChannelPost = !!(ctx.update && ctx.update.channel_post);
   const message = ctx.message || ctx.update.channel_post;
@@ -131,6 +150,7 @@ async function addToQueue(ctx, botHelper) {
   } = message;
 
   if (!isChannelPost && (!from || !botHelper.isAllowedUser(from.id))) {
+    notifyUnauthorizedUser(message, botHelper);
     return;
   }
 
@@ -201,104 +221,103 @@ async function addToQueue(ctx, botHelper) {
   }
 
   let links = getAllLinks(text);
-  let link = links[0];
-  if (!link && entities) {
+  if (!links.length && entities) {
     links = getLinkFromEntity(entities, text);
   }
-  link = getLink(links);
 
-  if (!link) {
+  if (!links.length) {
     logger('no link');
     return;
   }
 
-  link = toUrl(link);
+  // For authorized/admin users, process all links; for others, only the first
+  const isAllowed = isAdm || (userId && botHelper.isAllowedUser(userId));
+  const linksToProcess = isAllowed ? links : [getLink(links)];
 
-  let parsed;
-  try {
-    parsed = new url.URL(link);
-  } catch (error) {
-    logger('exit wrong url');
-    logger(error);
-    return;
-  }
+  for (let linkIdx = 0; linkIdx < linksToProcess.length; linkIdx++) {
+    let link = toUrl(linksToProcess[linkIdx]);
 
-  try {
-    if (link.match(/^(https?:\/\/)?(www.)?google/)) {
-      const matchUrl = link.match(/url=(.*?)($|&)/);
-      if (matchUrl && matchUrl[1]) {
-        link = decodeURIComponent(matchUrl[1]);
-      }
+    let parsed;
+    try {
+      parsed = new url.URL(link);
+    } catch (error) {
+      logger('exit wrong url');
+      logger(error);
+      continue;
     }
 
-    if (link.match(new RegExp(validRegex))) {
-      await ctx.reply(messages.showIvMessage('', link, link, parsed.host), {
-        parse_mode: botHelper.markdown(),
-      }).catch(error => {
-        logger('reply');
-        logger(error);
-        botHelper.sendError(error);
-      });
-      return;
-    }
-
-    if (link.match(/^((https?):\/\/)?(www\.)?(youtube|t)\.(com|me)\/?/)) {
-      logger('youtube exit');
-      return;
-    }
-
-    if (link.match(/yandex\.ru\/showcap/)) {
-      logger('yandex cap');
-      return;
-    }
-
-    if (!parsed.pathname && !parsed.protocol.match('https')) {
-      logger('main no ssl');
-      return;
-    }
-
-    let mid;
-    if (!botHelper.waitSec) {
-      const res = await ctx.reply('Waiting for instantView...').catch(error => {
-        logger('reply wait');
-        logger(error);
-        return {};
-      });
-
-      const messageId = res && res.message_id;
-      await timeout(0.1);
-      if (!messageId) {
-        logger('no MessageId exit');
-        return;
+    try {
+      if (link.match(/^(https?:\/\/)?(www.)?google/)) {
+        const matchUrl = link.match(/url=(.*?)($|&)/);
+        if (matchUrl && matchUrl[1]) {
+          link = decodeURIComponent(matchUrl[1]);
+          parsed = new url.URL(link);
+        }
       }
 
-      mid = messageId;
+      if (link.match(new RegExp(validRegex))) {
+        await ctx.reply(messages.showIvMessage('', link, link, parsed.host), {
+          parse_mode: botHelper.markdown(),
+        }).catch(error => {
+          logger('reply');
+          logger(error);
+          botHelper.sendError(error);
+        });
+        continue;
+      }
+
+      if (link.match(/^((https?):\/\/)?(www\.)?(youtube|t)\.(com|me)\/?/)) {
+        logger('youtube exit');
+        continue;
+      }
+
+      if (link.match(/yandex\.ru\/showcap/)) {
+        logger('yandex cap');
+        continue;
+      }
+
+      if (!parsed.pathname && !parsed.protocol.match('https')) {
+        logger('main no ssl');
+        continue;
+      }
+
+      let mid;
+      if (!botHelper.waitSec) {
+        const res = await ctx.reply('Waiting for instantView...').catch(error => {
+          logger('reply wait');
+          logger(error);
+          return {};
+        });
+
+        const messageId = res && res.message_id;
+        await timeout(0.1);
+        if (!messageId) {
+          logger('no MessageId exit');
+          continue;
+        }
+
+        mid = messageId;
+      }
+
+      const task = {
+        message_id: mid,
+        chatId,
+        isChanMesId,
+        link,
+        ...pdfData,
+        ...(userId ? {fromId: userId} : {}),
+      };
+
+      const force = isAdm && commandCheck(text);
+      if (force) {
+        task.force = force;
+      }
+
+      rabbitMq.addToChannel(task);
+    } catch (error) {
+      logger('send error');
+      logger(error);
     }
-
-    const task = {
-      message_id: mid,
-      chatId,
-      isChanMesId,
-      link,
-      ...pdfData,
-      ...(userId ? {fromId: userId} : {}),
-    };
-
-    const force = isAdm && commandCheck(text);
-    if (force) {
-      task.force = force;
-    }
-
-    const newIvTime = (+new Date() - global.lastIvTime) / 1000;
-    if (newIvTime > 3600) {
-      global.lastIvTime = +new Date();
-      botHelper.sendAdmin(`alert ${newIvTime} sec`);
-    }
-
-    rabbitMq.addToChannel(task);
-  } catch (error) {
-    logger('send error');
-    logger(error);
   }
 }
 

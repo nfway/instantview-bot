@@ -113,7 +113,8 @@ async function clearFromCollection(msg) {
     return 'empty';
   }
 
-  const searchByDomain = new RegExp(`^https?://${search}`);
+  const escapedSearch = search.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const searchByDomain = new RegExp(`^https?://${escapedSearch}`);
   const fromDate = new Date();
   fromDate.setMonth(fromDate.getMonth() - months);
 

@@ -204,9 +204,10 @@ class ParseHelper {
     let result = {};
     if (this.params.isCached) {
       const cf = this.params.cachefile;
-      const cacheFile = cf || 'mercury.html';
+      const cacheFile = path.basename(cf || 'mercury.html');
+      const cachePath = path.join('.conf', cacheFile);
       this.log('html from cache');
-      result.content = `${fs.readFileSync(`.conf/${cacheFile}`)}`;
+      result.content = `${fs.readFileSync(cachePath)}`;
     } else {
       if (mozillaParserEnabled) {
         logger('mozilla');

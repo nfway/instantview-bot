@@ -86,7 +86,7 @@ if (missingRequiredEnv.length) {
 
 if (unableToStart.length) {
   console.log(unableToStart.join('\n'));
-  process.exit(0);
+  process.exit(1);
 }
 
 const BOT_IS_OFF = env.NO_BOT === '1';

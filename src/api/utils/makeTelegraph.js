@@ -6,15 +6,17 @@ const {logger} = require('./logger');
 const {BOT_USERNAME} = require('../../config/vars');
 
 const MAX_LENGTH_CONTENT = 65000;
-let pages = 0;
-
 function lengthInUtf8Bytes(str) {
   if (!str) return 0;
-  // Matches only the 10.. bytes that are non-initial characters in a multi-byte sequence.
-  let encodedStr = encodeURIComponent(str);
-  encodedStr = encodedStr.match(/%[89ABab]/g);
+  return Buffer.byteLength(str, 'utf8');
+}
 
-  return str.length + (encodedStr ? encodedStr.length : 0);
+function escapeHtmlAttr(value) {
+  return `${value}`
+    .replace(/&/g, '&')
+    .replace(/"/g, '"')
+    .replace(/</g, '<')
+    .replace(/>/g, '>');
 }
 
 const makeTelegraphLinkNew = async (obj, content) => {
@@ -86,7 +88,7 @@ const makeLink = (obj, dom, link, index) => {
       return makeTelegaphMany(obj, dom, chunksLen + 1);
     }
     if (link) {
-      const nextBtn = `<p><br /><br /><a href="${link}">Read Next page</a></p>`;
+      const nextBtn = `<p><br /><br /><a href="${escapeHtmlAttr(link)}">Read Next page</a></p>`;
       dom.push(...toDomNode(nextBtn)[0].children);
     }
     content = JSON.stringify(dom);
@@ -99,7 +101,7 @@ const makeLink = (obj, dom, link, index) => {
   return '';
 };
 
-const makeTelegaphMany = async (obj, domObj, chunksLen) => {
+const makeTelegaphMany = async (obj, domObj, chunksLen, pageCounter) => {
   let dom = domObj;
   if (dom.length === 1) {
     dom = dom[0].children;
@@ -114,7 +116,7 @@ const makeTelegaphMany = async (obj, domObj, chunksLen) => {
     for (let partIdx = parts.length - 1; partIdx > 0; partIdx -= 1) {
       const domed = parts[partIdx];
       await timeout(3);
-      pages += 1;
+      pageCounter.pages += 1;
       const iVlink = await makeLink(obj, domed, link, partIdx);
       if (iVlink) {
         link = iVlink;
@@ -138,13 +140,13 @@ const makeTelegraph = async (objParam, parsedHtml) => {
   }
   if (obj.author_url) {
     if (obj.author_url.length > 512) {
-      obj.title = obj.title.substring(0, 512);
+      obj.author_url = obj.author_url.substring(0, 512);
     }
   } else {
     obj.author_url = `https://t.me/${BOT_USERNAME}`;
   }
   if (obj.author_name && obj.author_name.length > 128) {
-    obj.title = obj.title.substring(0, 128);
+    obj.author_name = obj.author_name.substring(0, 128);
   }
   let telegraphLink = '';
   let domEd = toDomNode(parsedHtml);
@@ -160,14 +162,14 @@ const makeTelegraph = async (objParam, parsedHtml) => {
   logger(content, 'domed.json');
   logger(`length ${parsedHtml.length}`);
   let isLong = false;
-  pages = 0;
+  const pageCounter = {pages: 0};
   if (content && content.length) {
     logger(`domed ${content.length}`);
     if (content.length > MAX_LENGTH_CONTENT || bytes > MAX_LENGTH_CONTENT) {
       isLong = true;
       logger(`is too big ${bytes}`);
       const chunksLen = Math.ceil(bytes / MAX_LENGTH_CONTENT);
-      telegraphLink = await makeTelegaphMany(obj, domEd, chunksLen + 1);
+      telegraphLink = await makeTelegaphMany(obj, domEd, chunksLen + 1, pageCounter);
     } else {
       telegraphLink = await makeTelegraphLink(obj, content);
     }
@@ -175,7 +177,7 @@ const makeTelegraph = async (objParam, parsedHtml) => {
   return {
     telegraphLink,
     isLong,
-    pages,
+    pages: pageCounter.pages,
   };
 };
 

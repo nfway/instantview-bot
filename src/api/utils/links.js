@@ -1,7 +1,17 @@
 function getAllLinks(text) {
-  const urlRegex =
-    /(\b(https?|ftp|file):\/\/[-A-Z0-9+&@#/%?=~_|!:,.;]*[-A-Z0-9+&@#/%=~_|])/gi;
-  return text.match(urlRegex) || [];
+  if (!text) {
+    return [];
+  }
+
+  const links = [];
+  const urlRegex = /\b(?:https?|ftp|file):\/\/\S+/gi;
+  let match;
+
+  while ((match = urlRegex.exec(text)) !== null) {
+    links.push(match[0].replace(/[),.;!?]+$/, ''));
+  }
+
+  return links;
 }
 
 function getLink(links) {
