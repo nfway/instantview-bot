@@ -46,10 +46,9 @@ class ParseHelper {
     this.domain = matches && matches[1];
     this.parsed = url.parse(link);
     const {host} = this.parsed;
-    const {dir = ''} = path.parse(link);
-    if (dir.match(/:\/\/./)) {
-      this.parsed.dir = dir;
-    }
+    const parsedUrl = new url.URL(link);
+    const pathnameDir = parsedUrl.pathname.replace(/[^/]+\/?$/, '');
+    this.parsed.dir = `${parsedUrl.protocol}//${parsedUrl.host}${pathnameDir}`;
     this.link = link;
     this.host = host;
     this.fb = false;
@@ -175,11 +174,10 @@ class ParseHelper {
   }
 
   fixHtml(content, iframe) {
-    return content;
-    // if (!content) {
-    //   return Promise.resolve(false);
-    // }
-    // return fixImages.fixHtml(content, iframe, this.parsed, this.params);
+    if (!content) {
+      return Promise.resolve(false);
+    }
+    return fixImages.fixHtml(content, iframe, this.parsed, this.params);
   }
 
   log(content, file) {

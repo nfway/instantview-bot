@@ -10,6 +10,38 @@ function checkImage(url) {
   return Promise.resolve(isImageUrl(url));
 }
 
+function getImageSrc(img) {
+  const attrs = ['src', 'data-src', 'data-original', 'data-lazy-src'];
+  for (const attr of attrs) {
+    const found = img.match(new RegExp(`${attr}=["']([^"']+)["']`, 'i'));
+    if (found && found[1]) {
+      return found[1];
+    }
+  }
+  return '';
+}
+
+function setImageSrc(img, src) {
+  if (img.match(/\ssrc=["'][^"']*["']/i)) {
+    return img.replace(/\ssrc=["'][^"']*["']/i, ` src="${src}"`);
+  }
+
+  return img.replace('<img', `<img src="${src}"`);
+}
+
+function resolveImageUrl(src, parsedUrl) {
+  const converted = convert(src);
+  if (converted.match(/^\/\//)) {
+    return `${parsedUrl.protocol}${converted}`;
+  }
+
+  try {
+    return new URL(converted, `${parsedUrl.protocol}//${parsedUrl.host}${parsedUrl.pathname || ''}`).href;
+  } catch (error) {
+    return '';
+  }
+}
+
 function convert(strParam) {
   let str = strParam;
   str = str.replace(/&amp;/g, '&');
@@ -39,43 +71,37 @@ const findImages = (content, parsedUrl, params) => {
   const urlRegex = /<img [^>]+\/?>/g;
   const imgs = content.match(urlRegex) || [];
   const tasks = [];
-  if (imgs.length && imgs.length < 10) {
-    let baseUrl = `${parsedUrl.protocol}//${parsedUrl.host}`;
-    for (let i = 0; i < imgs.length; i += 1) {
-      let img = imgs[i].replace(/\n/g, '');
-      img = img.replace(/\s+/g, ' ');
-      img = replaceDir(img, parsedUrl);
 
-      const src = img.match(/src="(.*?)"/);
-      if (src && src[1]) {
-        let s = src[1];
-        let sl = '';
-        if (s[0] !== '/') {
-          baseUrl = parsedUrl.dir;
-          sl = '/';
-        }
-        if (!s.match('://')) {
-          s = `${baseUrl}${sl}${s}`;
-        }
-        s = convert(s);
-        if (params.isCached) {
-          tasks.push({
-            isValid: true,
-            i
-          });
-        } else {
-          tasks.push(
-            checkImage(s)
-              .then(isValid => ({
-                isValid,
-                i,
-              }))
-              .catch(() => ({
-                isValid: false,
-                i
-              })),
-          );
-        }
+  for (let i = 0; i < imgs.length; i += 1) {
+    let img = imgs[i].replace(/\n/g, '');
+    img = img.replace(/\s+/g, ' ');
+    img = replaceDir(img, parsedUrl);
+
+    const src = getImageSrc(img);
+    if (src) {
+      const resolvedSrc = resolveImageUrl(src, parsedUrl);
+      if (!resolvedSrc) {
+        tasks.push(Promise.resolve({isValid: false, i, img: ''}));
+        continue;
+      }
+
+      const normalizedImg = setImageSrc(img, resolvedSrc);
+      if (params.isCached) {
+        tasks.push(Promise.resolve({isValid: true, i, img: normalizedImg}));
+      } else {
+        tasks.push(
+          checkImage(resolvedSrc)
+            .then(isValid => ({
+              isValid,
+              i,
+              img: normalizedImg,
+            }))
+            .catch(() => ({
+              isValid: false,
+              i,
+              img: '',
+            })),
+        );
       }
     }
   }
@@ -83,9 +109,10 @@ const findImages = (content, parsedUrl, params) => {
   return Promise.all(tasks)
     .then(checked => {
       for (let i = 0; i < checked.length; i += 1) {
-        if (!checked[i].isValid) imgs[checked[i].i] = '';
+        imgs[checked[i].i] = checked[i].isValid ? checked[i].img : '';
       }
-      return imgs;
+
+      return imgs.filter(Boolean);
     });
 };
 
@@ -112,22 +139,14 @@ const replaceTags = (contentParam, imgs, replaceWith) => {
 
 const restoreTags = (contentParam, images, replaceFrom, parsedUrl) => {
   let content = contentParam;
-  let baseUrl = `${parsedUrl.protocol}//${parsedUrl.host}`;
   for (let i = 0; i < images.length; i += 1) {
     let img = images[i];
     img = convert(img);
     img = replaceDir(img, parsedUrl);
-    if (!img.match(/src=.(\/\/|https?)/)) {
-      let sl = '';
-      if (!img.match(/src="\//)) {
-        baseUrl = parsedUrl.dir;
-        sl = '/';
-      }
-      if (baseUrl && !img.match(/src=.\.\.|;base64/)) {
-        img = img.replace(' src="', ` src="${baseUrl}${sl}`);
-      } else {
-        img = '';
-      }
+    const src = getImageSrc(img);
+    if (src && !img.match(/src=.(\/\/|https?)/)) {
+      const resolvedSrc = resolveImageUrl(src, parsedUrl);
+      img = resolvedSrc ? setImageSrc(img, resolvedSrc) : '';
     }
     content = content.replace(imgReplacer, img);
   }
